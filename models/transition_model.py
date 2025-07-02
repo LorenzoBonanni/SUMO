@@ -196,7 +196,7 @@ class TransitionModel:
                 penalty = np.log(kd_tree.query(query_vector) + 1).squeeze()
                 normalize_diffs = True
                 if normalize_diffs:
-                    penalty = Scaler(penalty)
+                    penalty = Scaler()(penalty)
 
             elif self.uncertainty == "faiss":
                 query_vector = np.concatenate((obs,act,next_obs), axis=-1)
@@ -204,7 +204,7 @@ class TransitionModel:
                 penalty = np.log(faiss_index.query(query_vector)+1).squeeze()
                 normalize_diffs = True
                 if normalize_diffs:
-                    penalty = Scaler(penalty)
+                    penalty = Scaler()(penalty)
 
             penalized_rewards = rewards - penalty_coeff * penalty
         else:
