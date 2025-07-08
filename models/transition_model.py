@@ -6,7 +6,9 @@ from models.ensemble_dynamics import EnsembleModel
 from operator import itemgetter
 from common.normalizer import StandardNormalizer
 from copy import deepcopy
-from common.util import KD_tree, Faiss, Scaler
+from common.util import KD_tree, Faiss, Scaler, calc_pairwise_symmetric_uncertainty_for_measure_function, \
+    calc_uncertainty_score_genShen
+
 
 class TransitionModel:
     def __init__(self,
@@ -173,28 +175,29 @@ class TransitionModel:
 
         # penalty rewards
         penalty_coeff = 1
-        penalty_learned_var = True
         if penalty_coeff != 0:
-            if self.uncertainty == 'ensemble':
-                if not penalty_learned_var:
-                    ensemble_means_obs = pred_diff_means[:, :, 1:]
-                    mean_obs_means = np.mean(ensemble_means_obs, axis=0)  # average predictions over models
-                    diffs = ensemble_means_obs - mean_obs_means
-                    normalize_diffs = False
-                    if normalize_diffs:
-                        obs_dim = next_obs.shape[1]
-                        obs_sigma = self.model.scaler.cached_sigma[0, :obs_dim]
-                        diffs = diffs / obs_sigma
-                    dists = np.linalg.norm(diffs, axis=2)  # distance in obs space
-                    penalty = np.max(dists, axis=0)  # max distances over models
-                else:
-                    penalty = np.amax(np.linalg.norm(ensemble_model_stds, axis=2), axis=0)
+            if self.uncertainty == 'max_pair_diff':
+                # Max Pairwise Diff (MOReL)
+                ensemble_means_obs = pred_diff_means[:, :, 1:]
+                mean_obs_means = np.mean(ensemble_means_obs, axis=0)  # average predictions over models
+                diffs = ensemble_means_obs - mean_obs_means
+                normalize_diffs = False
+                if normalize_diffs:
+                    obs_dim = next_obs.shape[1]
+                    obs_sigma = self.model.scaler.cached_sigma[0, :obs_dim]
+                    diffs = diffs / obs_sigma
+                dists = np.linalg.norm(diffs, axis=2)  # distance in obs space
+                penalty = np.max(dists, axis=0)  # max distances over models
+
+            elif self.uncertainty == 'max_aleatoric':
+                # Max Aleatoric (MOPO)
+                penalty = np.amax(np.linalg.norm(ensemble_model_stds, axis=2), axis=0)
 
             elif self.uncertainty == "kd":
                 query_vector = np.concatenate((obs,act,next_obs), axis=-1)
                 kd_tree = KD_tree(data=np.concatenate((self.dataset['observations'],self.dataset['actions'],self.dataset['next_observations']),axis=-1))
                 penalty = np.log(kd_tree.query(query_vector) + 1).squeeze()
-                normalize_diffs = True
+                normalize_diffs = False
                 if normalize_diffs:
                     penalty = Scaler()(penalty)
 
@@ -202,12 +205,32 @@ class TransitionModel:
                 query_vector = np.concatenate((obs,act,next_obs), axis=-1)
                 faiss_index = Faiss(data=np.concatenate((self.dataset['observations'],self.dataset['actions'],self.dataset['next_observations']),axis=-1))
                 penalty = np.log(faiss_index.query(query_vector)+1).squeeze()
-                normalize_diffs = True
+                normalize_diffs = False
                 if normalize_diffs:
                     penalty = Scaler()(penalty)
 
+            elif self.uncertainty == 'gjsd':
+                # 1. Get means and variances (assumed pred_diff_stds is actually std-dev, so square for variance)
+                means_of_all_ensembles = pred_diff_means  # [ensemble_size, batch_size, obs_dim]
+                vars_of_all_ensembles = ensemble_model_stds ** 2  # [ensemble_size, batch_size, obs_dim]
+                ensemble_size = means_of_all_ensembles.shape[0]
+
+                # 2. Calculate the pairwise geometric Jensen-Shannon divergence for this batch
+                penalty = calc_pairwise_symmetric_uncertainty_for_measure_function(
+                    means_of_all_ensembles,
+                    vars_of_all_ensembles,
+                    ensemble_size,
+                    calc_uncertainty_score_genShen
+                )  # penalty should have shape (batch_size,)
+
+                # Optionally normalize penalty here as in other branches
+
             penalized_rewards = rewards - penalty_coeff * penalty
+
+
+
         else:
+            penalty = np.zeros_like(rewards)
             penalized_rewards = rewards
 
         assert (type(next_obs) == np.ndarray)

@@ -9,6 +9,7 @@ import d4rl
 
 import numpy as np
 import torch
+import wandb
 from torch.utils.tensorboard import SummaryWriter
 
 from models.transition_model import TransitionModel
@@ -18,45 +19,7 @@ from algo.mopo import MOPO
 from common.buffer import ReplayBuffer
 from common.logger import Logger
 from trainer import Trainer
-from common.util import set_device_and_logger, Scaler
-
-
-def get_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--algo-name", type=str, default="mopo")
-    parser.add_argument("--task", type=str, default="halfcheetah-medium-replay-v2")
-    parser.add_argument("--seed", type=int, default=1)
-    parser.add_argument("--actor-lr", type=float, default=3e-4)
-    parser.add_argument("--critic-lr", type=float, default=3e-4)
-    parser.add_argument("--gamma", type=float, default=0.99)
-    parser.add_argument("--tau", type=float, default=0.005)
-    parser.add_argument("--alpha", type=float, default=0.2)
-    parser.add_argument('--auto-alpha', default=True)
-    parser.add_argument('--target-entropy', type=int, default=-3)
-    parser.add_argument('--alpha-lr', type=float, default=3e-4)
-
-    # dynamics model's arguments
-    parser.add_argument("--dynamics-lr", type=float, default=0.001)
-    parser.add_argument("--n-ensembles", type=int, default=7)
-    parser.add_argument("--n-elites", type=int, default=5)
-    parser.add_argument("--reward-penalty-coef", type=float, default=1.0)
-    parser.add_argument("--rollout-length", type=int, default=1)
-    parser.add_argument("--rollout-batch-size", type=int, default=50000)
-    parser.add_argument("--rollout-freq", type=int, default=1000)
-    parser.add_argument("--model-retain-epochs", type=int, default=5)
-    parser.add_argument("--real-ratio", type=float, default=0.05)
-    parser.add_argument("--dynamics-model-dir", type=str, default=None)
-    parser.add_argument("--uncertainty",type=str, default='faiss') # kd, faiss, ensemble
-
-    parser.add_argument("--epoch", type=int, default=1000)
-    parser.add_argument("--step-per-epoch", type=int, default=1000)
-    parser.add_argument("--eval_episodes", type=int, default=10)
-    parser.add_argument("--batch-size", type=int, default=256)
-    parser.add_argument("--logdir", type=str, default="log")
-    parser.add_argument("--log-freq", type=int, default=1000)
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-
-    return parser.parse_args()
+from common.util import set_device_and_logger, Scaler, get_args
 
 
 def rollout(args=get_args()):
@@ -146,10 +109,11 @@ def rollout(args=get_args()):
                                      dataset=dataset,
                                      **config["transition_params"]
                                      )
-    
+    base_path = 'log/halfcheetah-medium-replay-v2/mopo/seed_1_0629_151301-halfcheetah_medium_replay_v2_mopo'
+    model_path = os.path.join(base_path, 'models/ite_dynamics_model/model.pt')
+    policy_path = os.path.join(base_path, 'policy.pth')
     model_path = ''
     policy_path = ''
-
     dynamics_model.model = torch.load(model_path)
     #dynamics_model.model.to(args.device)
     sac_policy.load_state_dict(torch.load(policy_path))
@@ -186,6 +150,7 @@ def rollout(args=get_args()):
     print(error_list)
 
 def train(args=get_args()):
+    wandb.init(project="sumo", sync_tensorboard=True)
     # create env and dataset
     env = gym.make(args.task)
 
@@ -329,4 +294,4 @@ def train(args=get_args()):
 
 if __name__ == "__main__":
     train()
-    #rollout()
+    # rollout()

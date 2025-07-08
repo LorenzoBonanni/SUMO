@@ -1,0 +1,6 @@
+run.sh
+log/
+outputs/
+.idea/
+__pycache__/
+wandb/

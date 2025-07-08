@@ -1,7 +1,6 @@
 import os
 import atexit
 
-
 class Logger:
     def __init__(self, writer, output_fname="progress.txt", log_path="log"):
         self.writer = writer

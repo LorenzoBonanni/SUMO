@@ -1,3 +1,4 @@
+import argparse
 import os
 import ast
 import random
@@ -158,3 +159,84 @@ class Scaler:
             cls.scale_value = abs(np.max(penalty))
         
         return penalty / cls.scale_value * cls.r_max
+
+def calc_uncertainty_score_genShen(means_first_gaussian: np.ndarray, vars_first_gaussian: np.ndarray,
+                                      means_second_gaussian: np.ndarray, vars_second_gaussian: np.ndarray) -> np.ndarray:
+    al = 0.5
+
+    t1 = (1 - al) * means_first_gaussian / vars_first_gaussian * means_first_gaussian
+    t1S = np.sum(t1, axis=1)
+
+    t2 = al * means_second_gaussian / vars_second_gaussian * means_second_gaussian
+    t2S = np.sum(t2, axis=1)
+
+    sigAL = 1 / ((1 - al) / vars_first_gaussian + al / vars_second_gaussian)
+    muAl = sigAL * ((1 - al) / vars_first_gaussian * means_first_gaussian + al / vars_second_gaussian * means_second_gaussian)
+
+    t3 = muAl / sigAL * muAl
+    t3S = np.sum(t3, axis=1)
+
+    log_det_S1 = np.sum(np.log(vars_first_gaussian), axis=1)
+    log_det_S2 = np.sum(np.log(vars_second_gaussian), axis=1)
+    log_det_SSum = np.sum(np.log(sigAL), axis=1)
+
+    log_term = (1 - al) * log_det_S1 + al * log_det_S2 - log_det_SSum
+
+    shanon = 0.5 * (t1S + t2S - t3S + log_term)
+    return shanon
+
+def calc_pairwise_symmetric_uncertainty_for_measure_function(means_of_all_ensembles: np.ndarray,
+                                                                vars_of_all_ensembles: np.ndarray,
+                                                                ensemble_size: int, measure_func):
+    counter_u = 1
+    sum_uncertainty = measure_func(means_of_all_ensembles[0],
+                                   vars_of_all_ensembles[0],
+                                   means_of_all_ensembles[1],
+                                   vars_of_all_ensembles[1])
+
+    for j in range(2, ensemble_size):
+        for k in range(j):
+            counter_u = counter_u + 1
+            sum_uncertainty += measure_func(means_of_all_ensembles[j],
+                                            vars_of_all_ensembles[j],
+                                            means_of_all_ensembles[k],
+                                            vars_of_all_ensembles[k])
+    sum_uncertainty = sum_uncertainty / counter_u
+    return sum_uncertainty
+
+def get_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--algo-name", type=str, default="mopo")
+    parser.add_argument("--task", type=str, default="halfcheetah-medium-replay-v2")
+    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--actor-lr", type=float, default=3e-4)
+    parser.add_argument("--critic-lr", type=float, default=3e-4)
+    parser.add_argument("--gamma", type=float, default=0.99)
+    parser.add_argument("--tau", type=float, default=0.005)
+    parser.add_argument("--alpha", type=float, default=0.2)
+    parser.add_argument('--auto-alpha', default=True)
+    parser.add_argument('--target-entropy', type=int, default=-3)
+    parser.add_argument('--alpha-lr', type=float, default=3e-4)
+
+    # dynamics model's arguments
+    parser.add_argument("--dynamics-lr", type=float, default=0.001)
+    parser.add_argument("--n-ensembles", type=int, default=7)
+    parser.add_argument("--n-elites", type=int, default=5)
+    parser.add_argument("--reward-penalty-coef", type=float, default=1.0)
+    parser.add_argument("--rollout-length", type=int, default=1)
+    parser.add_argument("--rollout-batch-size", type=int, default=50000)
+    parser.add_argument("--rollout-freq", type=int, default=1000)
+    parser.add_argument("--model-retain-epochs", type=int, default=5)
+    parser.add_argument("--real-ratio", type=float, default=0.05)
+    parser.add_argument("--dynamics-model-dir", type=str, default=None)
+    parser.add_argument("--uncertainty",type=str, default='faiss', choices=["kd", "faiss",  "max_pair_diff", "max_aleatoric", "gjsd"])
+
+    parser.add_argument("--epoch", type=int, default=1000)
+    parser.add_argument("--step-per-epoch", type=int, default=1000)
+    parser.add_argument("--eval_episodes", type=int, default=10)
+    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--logdir", type=str, default="log")
+    parser.add_argument("--log-freq", type=int, default=1000)
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+
+    return parser.parse_args()

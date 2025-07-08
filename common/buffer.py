@@ -109,3 +109,88 @@ class ReplayBuffer:
     @property
     def get_size(self):
         return self.size
+
+
+class RolloutBuffer:
+    def __init__(
+            self,
+            buffer_size,
+            obs_shape,
+            obs_dtype,
+            action_dim,
+            action_dtype,
+    ):
+        self.max_size = buffer_size
+        self.obs_shape = obs_shape
+        self.obs_dtype = obs_dtype
+        self.action_dim = action_dim
+        self.action_dtype = action_dtype
+
+        self.ptr = 0
+        self.size = 0
+
+        self.observations = np.zeros((self.max_size,) + self.obs_shape, dtype=obs_dtype)
+        self.actions = np.zeros((self.max_size, self.action_dim), dtype=action_dtype)
+        self.predicted_next_observations = np.zeros((self.max_size,) + self.obs_shape, dtype=obs_dtype)
+        self.true_next_observations = np.zeros((self.max_size,) + self.obs_shape, dtype=obs_dtype)
+        self.penalties = np.zeros((self.max_size, 1), dtype=np.float32)
+
+    def add(self, obs, action, predicted_next_obs, true_next_obs, penalty):
+        self.observations[self.ptr] = np.array(obs).copy()
+        self.actions[self.ptr] = np.array(action).copy()
+        self.predicted_next_observations[self.ptr] = np.array(predicted_next_obs).copy()
+        self.true_next_observations[self.ptr] = np.array(true_next_obs).copy()
+        self.penalties[self.ptr] = np.array(penalty).copy()
+
+        self.ptr = (self.ptr + 1) % self.max_size
+        self.size = min(self.size + 1, self.max_size)
+
+    def add_batch(self, obs, actions, predicted_next_obs, true_next_obs, penalties):
+        batch_size = len(obs)
+        if self.ptr + batch_size > self.max_size:
+            begin = self.ptr
+            end = self.max_size
+            first_add_size = end - begin
+            self.observations[begin:end] = np.array(obs[:first_add_size]).copy()
+            self.predicted_next_observations[begin:end] = np.array(predicted_next_obs[:first_add_size]).copy()
+            self.actions[begin:end] = np.array(actions[:first_add_size]).copy()
+            self.true_next_observations[begin:end] = np.array(true_next_obs[:first_add_size]).copy()
+            self.penalties[begin:end] = np.array(np.expand_dims(penalties[:first_add_size], 1)).copy()
+
+            begin = 0
+            end = batch_size - first_add_size
+            self.observations[begin:end] = np.array(obs[first_add_size:]).copy()
+            self.predicted_next_observations[begin:end] = np.array(predicted_next_obs[first_add_size:]).copy()
+            self.actions[begin:end] = np.array(actions[first_add_size:]).copy()
+            self.true_next_observations[begin:end] = np.array(true_next_obs[first_add_size:]).copy()
+            self.penalties[begin:end] = np.array(np.expand_dims(penalties[first_add_size:], 1)).copy()
+
+            self.ptr = end
+            self.size = min(self.size + batch_size, self.max_size)
+
+        else:
+            begin = self.ptr
+            end = self.ptr + batch_size
+            self.observations[begin:end] = np.array(obs).copy()
+            self.predicted_next_observations[begin:end] = np.array(predicted_next_obs).copy()
+            self.actions[begin:end] = np.array(actions).copy()
+            self.true_next_observations[begin:end] = np.array(true_next_obs).copy()
+            self.penalties[begin:end] = np.expand_dims(penalties, 1).copy()
+
+            self.ptr = end
+            self.size = min(self.size + batch_size, self.max_size)
+
+    def load_dataset(self, path):
+        dataset = np.load(path, allow_pickle=True)
+        observations = dataset["observations"]
+        actions = dataset["actions"]
+        true_next_observations = dataset["true"]
+        predicted_next_observations = dataset["predicted"]
+
+        self.observations = observations
+        self.actions = actions
+        self.predicted_next_observations = predicted_next_observations
+        self.true_next_observations = true_next_observations
+
+        self.ptr = len(observations)
+        self.size = len(observations)
