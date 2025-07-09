@@ -1,7 +1,14 @@
 import numpy as np
+from torch import nn
+
+from common.buffer import ReplayBuffer
+from common.util import get_args
+from comparison_uncertanty_measures import setup_environment_and_dataset, setup_logging
+import numpy as np
 import torch
 import os
 from common import util, functional
+from models.ae_network import AutoencoderNetwork, DenoisingAutoencoder
 from models.ensemble_dynamics import EnsembleModel
 from operator import itemgetter
 from common.normalizer import StandardNormalizer
@@ -9,26 +16,22 @@ from copy import deepcopy
 from common.util import KD_tree, Faiss, Scaler, calc_pairwise_symmetric_uncertainty_for_measure_function, \
     calc_uncertainty_score_genShen
 
+HOLD_OUT_RATIO = 0.1
 
-class TransitionModel:
+class AutoencoderModel:
     def __init__(self,
                  obs_space,
                  action_space,
-                 static_fns,
                  lr,
                  dataset,
                  holdout_ratio=0.1,
-                 inc_var_loss=False,
-                 use_weight_decay=False,
-                 uncertainty='ensemble',
-                 **kwargs):
+                 use_weight_decay=False):
 
         obs_dim = obs_space.shape[0]
         action_dim = action_space.shape[0]
 
         self.device = util.device
-        self.model = EnsembleModel(obs_dim=obs_dim, action_dim=action_dim, device=util.device, **kwargs['model'])
-        self.static_fns = static_fns
+        self.model = DenoisingAutoencoder(input_dim=obs_dim+action_dim+obs_dim).to(self.device)
         self.lr = lr
 
         self.model_optimizer = torch.optim.Adam(self.model.parameters(), self.lr)
@@ -37,73 +40,73 @@ class TransitionModel:
         }
         self.obs_space = obs_space
         self.holdout_ratio = holdout_ratio
-        self.inc_var_loss = inc_var_loss
         self.use_weight_decay = use_weight_decay
         self.obs_normalizer = StandardNormalizer()
         self.act_normalizer = StandardNormalizer()
+        self.next_obs_normalizer = StandardNormalizer()
         self.model_train_timesteps = 0
-        
-        self.uncertainty = uncertainty
+
         self.dataset = dataset
 
     @torch.no_grad()
     def eval_data(self, data, update_elite_models=False):
-        obs_list, action_list, next_obs_list, reward_list = \
-            itemgetter("observations", 'actions', 'next_observations', 'rewards')(data)
+        obs_list, action_list, next_obs_list, reward_list = itemgetter("observations", 'actions', 'next_observations', 'rewards')(data)
         obs_list = torch.Tensor(obs_list)
         action_list = torch.Tensor(action_list)
         next_obs_list = torch.Tensor(next_obs_list)
         reward_list = torch.Tensor(reward_list)
         delta_obs_list = next_obs_list - obs_list
-        obs_list, action_list = self.transform_obs_action(obs_list, action_list)
-        model_input = torch.cat([obs_list, action_list], dim=-1).to(util.device)
-        predictions = functional.minibatch_inference(args=[model_input], rollout_fn=self.model.predict,
+        obs_list, action_list, next_obs_list = self.transform_obs_action(obs_list, action_list, next_obs_list)
+        model_input = torch.cat([obs_list, action_list, next_obs_list], dim=-1).to(util.device)
+        groundtruths = model_input.clone()
+        predictions = functional.minibatch_inference(args=[model_input], rollout_fn=self.model.forward,
                                                      batch_size=10000,
                                                      cat_dim=1)  # the inference size grows as model buffer increases
-        groundtruths = torch.cat((delta_obs_list, reward_list), dim=1).to(util.device)
         eval_mse_losses, _ = self.model_loss(predictions, groundtruths, mse_only=True)
-        if update_elite_models:
-            elite_idx = np.argsort(eval_mse_losses.cpu().numpy())
-            self.model.elite_model_idxes = elite_idx[:self.model.num_elite]
+        # if update_elite_models:
+        #     elite_idx = np.argsort(eval_mse_losses.cpu().numpy())
+        #     self.model.elite_model_idxes = elite_idx[:self.model.num_elite]
         return eval_mse_losses.detach().cpu().numpy(), None
 
     def reset_normalizers(self):
         self.obs_normalizer.reset()
         self.act_normalizer.reset()
+        self.next_obs_normalizer.reset()
 
-    def update_normalizer(self, obs, action):
+    def update_normalizer(self, obs, action, next_obs):
         self.obs_normalizer.update(obs)
         self.act_normalizer.update(action)
+        self.next_obs_normalizer.update(next_obs)
 
-    def transform_obs_action(self, obs, action):
+    def transform_obs_action(self, obs, action, next_obs):
         obs = self.obs_normalizer.transform(obs)
         action = self.act_normalizer.transform(action)
-        return obs, action
+        next_obs = self.next_obs_normalizer.transform(next_obs)
+        return obs, action, next_obs
 
     def update(self, data_batch):
-        obs_batch, action_batch, next_obs_batch, reward_batch = \
-            itemgetter("observations", 'actions', 'next_observations', 'rewards')(data_batch)
+        obs_batch, action_batch, next_obs_batch, reward_batch = itemgetter("observations", 'actions', 'next_observations', 'rewards')(data_batch)
         obs_batch = torch.Tensor(obs_batch)
         action_batch = torch.Tensor(action_batch)
         next_obs_batch = torch.Tensor(next_obs_batch)
         reward_batch = torch.Tensor(reward_batch)
 
-        delta_obs_batch = next_obs_batch - obs_batch
-        obs_batch, action_batch = self.transform_obs_action(obs_batch, action_batch)
+        obs_batch, action_batch, next_obs_batch = self.transform_obs_action(obs_batch, action_batch, next_obs_batch)
 
         # predict with model
-        model_input = torch.cat([obs_batch, action_batch], dim=-1).to(util.device)
-        predictions = self.model.predict(model_input)
+        model_input = torch.cat([obs_batch, action_batch, next_obs_batch], dim=-1).to(util.device)
+        groundtruths = model_input.clone()
+        predictions = self.model(model_input)
 
         # compute training loss
-        groundtruths = torch.cat((delta_obs_batch, reward_batch), dim=-1).to(util.device)
-        train_mse_losses, train_var_losses = self.model_loss(predictions, groundtruths)
-        train_mse_loss = torch.sum(train_mse_losses)
-        train_var_loss = torch.sum(train_var_losses)
-        train_transition_loss = train_mse_loss + train_var_loss
-        train_transition_loss += 0.01 * torch.sum(self.model.max_logvar) - 0.01 * torch.sum(
-            self.model.min_logvar)  # why
-        if self.use_weight_decay:
+        train_mse_losses, _ = self.model_loss(predictions, groundtruths)
+        # train_mse_loss = torch.sum(train_mse_losses)
+        # train_var_loss = torch.sum(train_var_losses)
+        # train_transition_loss = train_mse_loss + train_var_loss
+        # train_transition_loss += 0.01 * torch.sum(self.model.max_logvar) - 0.01 * torch.sum(self.model.min_logvar)  # why
+        train_transition_loss = train_mse_losses
+        # TODO: add weight decay loss
+        if False:
             decay_loss = self.model.get_decay_loss()
             train_transition_loss += decay_loss
         else:
@@ -114,27 +117,12 @@ class TransitionModel:
         self.model_optimizer.step()
         # compute test loss for elite model
         return {
-            "loss/train_model_loss_mse": train_mse_loss.item(),
-            "loss/train_model_loss_var": train_var_loss.item(),
-            "loss/train_model_loss": train_var_loss.item(),
-            "loss/decay_loss": decay_loss.item() if decay_loss is not None else 0,
-            "misc/max_std": self.model.max_logvar.mean().item(),
-            "misc/min_std": self.model.min_logvar.mean().item()
+            "loss/train_ae_loss_mse": train_mse_losses.item(),
+            "loss/decay_loss": decay_loss.item() if decay_loss is not None else 0
         }
 
     def model_loss(self, predictions, groundtruths, mse_only=False):
-        pred_means, pred_logvars = predictions
-        if self.inc_var_loss and not mse_only:
-            # Average over batch and dim, sum over ensembles.
-            inv_var = torch.exp(-pred_logvars)
-            mse_losses = torch.mean(torch.mean(torch.pow(pred_means - groundtruths, 2) * inv_var, dim=-1), dim=-1)
-            var_losses = torch.mean(torch.mean(pred_logvars, dim=-1), dim=-1)
-        elif mse_only:
-            mse_losses = torch.mean(torch.pow(pred_means - groundtruths, 2), dim=(1, 2))
-            var_losses = None
-        else:
-            assert 0
-        return mse_losses, var_losses
+        return torch.nn.functional.mse_loss(predictions, groundtruths), None
 
     @torch.no_grad()
     def predict(self, obs, act, deterministic=False, penalty_coeff=0):
@@ -142,8 +130,8 @@ class TransitionModel:
         predict next_obs and rew
         """
         if len(obs.shape) == 1:
-            obs = obs[None, ]
-            act = act[None, ]
+            obs = obs[None,]
+            act = act[None,]
         if not isinstance(obs, torch.Tensor):
             obs = torch.FloatTensor(obs).to(util.device)
         if not isinstance(act, torch.Tensor):
@@ -152,7 +140,7 @@ class TransitionModel:
         scaled_obs, scaled_act = self.transform_obs_action(obs, act)
 
         model_input = torch.cat([scaled_obs, scaled_act], dim=-1).to(util.device)
-        pred_diff_means, pred_diff_logvars = self.model.predict(model_input)
+        pred_diff_means, pred_diff_logvars = self.model(model_input)
         pred_diff_means = pred_diff_means.detach().cpu().numpy()
         # add curr obs for next obs
         obs = obs.detach().cpu().numpy()
@@ -193,17 +181,21 @@ class TransitionModel:
                 penalty = np.amax(np.linalg.norm(ensemble_model_stds, axis=2), axis=0)
 
             elif self.uncertainty == "kd":
-                query_vector = np.concatenate((obs,act,next_obs), axis=-1)
-                kd_tree = KD_tree(data=np.concatenate((self.dataset['observations'],self.dataset['actions'],self.dataset['next_observations']),axis=-1))
+                query_vector = np.concatenate((obs, act, next_obs), axis=-1)
+                kd_tree = KD_tree(data=np.concatenate(
+                    (self.dataset['observations'], self.dataset['actions'], self.dataset['next_observations']),
+                    axis=-1))
                 penalty = np.log(kd_tree.query(query_vector) + 1).squeeze()
                 normalize_diffs = False
                 if normalize_diffs:
                     penalty = Scaler()(penalty)
 
             elif self.uncertainty == "faiss":
-                query_vector = np.concatenate((obs,act,next_obs), axis=-1)
-                faiss_index = Faiss(data=np.concatenate((self.dataset['observations'],self.dataset['actions'],self.dataset['next_observations']),axis=-1))
-                penalty = np.log(faiss_index.query(query_vector)+1).squeeze()
+                query_vector = np.concatenate((obs, act, next_obs), axis=-1)
+                faiss_index = Faiss(data=np.concatenate(
+                    (self.dataset['observations'], self.dataset['actions'], self.dataset['next_observations']),
+                    axis=-1))
+                penalty = np.log(faiss_index.query(query_vector) + 1).squeeze()
                 normalize_diffs = False
                 if normalize_diffs:
                     penalty = Scaler()(penalty)
@@ -240,28 +232,26 @@ class TransitionModel:
 
     def update_best_snapshots(self, val_losses):
         updated = False
-        for i in range(len(val_losses)):
-            current_loss = val_losses[i]
-            best_loss = self.best_snapshot_losses[i]
+        current_loss = val_losses
+        best_loss = self.best_snapshot_losses
+        improvement = (best_loss - current_loss) / best_loss
+        if improvement > 0.01:
+            self.best_snapshot_losses = current_loss
+            self.save_model_snapshot(0)
+            updated = True
             improvement = (best_loss - current_loss) / best_loss
-            if improvement > 0.01:
-                self.best_snapshot_losses[i] = current_loss
-                self.save_model_snapshot(i)
-                updated = True
-                improvement = (best_loss - current_loss) / best_loss
-                # print('epoch {} | updated {} | improvement: {:.4f} | best: {:.4f} | current: {:.4f}'.format(epoch, i, improvement, best, current))
+            # print('epoch {} | updated {} | improvement: {:.4f} | best: {:.4f} | current: {:.4f}'.format(epoch, i, improvement, best, current))
         return updated
 
     def reset_best_snapshots(self):
-        self.model_best_snapshots = [deepcopy(self.model.ensemble_models[idx].state_dict()) for idx in
-                                     range(self.model.ensemble_size)]
-        self.best_snapshot_losses = [1e10 for _ in range(self.model.ensemble_size)]
+        self.model_best_snapshots = deepcopy(self.model.state_dict())
+        self.best_snapshot_losses = 1e10
 
     def save_model_snapshot(self, idx):
-        self.model_best_snapshots[idx] = deepcopy(self.model.ensemble_models[idx].state_dict())
+        self.model_best_snapshots = deepcopy(self.model.state_dict())
 
     def load_best_snapshots(self):
-        self.model.load_state_dicts(self.model_best_snapshots)
+        self.model.load_state_dict(self.model_best_snapshots)
 
     def save_model(self, info):
         save_dir = os.path.join(util.logger.log_path, 'models')
@@ -274,7 +264,7 @@ class TransitionModel:
             save_path = os.path.join(model_save_dir, network_name + ".pt")
             torch.save(network, save_path)
 
-    def load_model(self, info):#这根本不是load
+    def load_model(self, info):  # 这根本不是load
         save_dir = os.path.join(util.logger.log_path, 'models')
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)

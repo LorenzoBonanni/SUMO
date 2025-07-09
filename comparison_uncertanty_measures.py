@@ -17,12 +17,11 @@ from common.util import get_args, set_device_and_logger
 from models.policy_models import Critic, ActorProb, MLP, DiagGaussian
 from models.transition_model import TransitionModel
 
+
 SAMPLE_SIZE = 100
 ROLLOUT_LENGTH = 100
 
 def plot_uncertainty_vs_distance(dist, uncertainty, save_path=None):
-
-
     plt.figure(figsize=(8, 6))
     plt.scatter(dist, uncertainty, alpha=0.5, label='Data points')
     slope, intercept, r_value, p_value, std_err = linregress(dist, uncertainty)
@@ -69,7 +68,7 @@ def rollout_data(dynamics_model, policy, offline_buffer, online_buffer, env, sam
 
     for _ in range(rollout_length):
         actions = policy.sample_action(observations)
-        next_obs, rewards, terminals, infos = dynamics_model.predict(observations, actions)
+        next_obs, rewards, terminals, infos = dynamics_model.predict(observations, actions, penalty_coeff=1.0)
         online_buffer.add_batch(observations, actions, next_obs, np.zeros_like(next_obs), infos["penalty"])
 
         non_terminal = (~terminals).flatten()
@@ -178,7 +177,8 @@ def load_model_components(dynamics_model, policy, model_path, policy_path):
 
 def compare_uncertainty_measures(args=get_args()):
     env, dataset = setup_environment_and_dataset(args)
-    writer, logger, log_path = setup_logging(args)
+    # writer, logger, log_path = setup_logging(args)
+    set_device_and_logger(0 if args.device == 'cuda' else -1, None)
 
     # Dynamic configuration
     task_prefix = args.task.split('-')[0]
@@ -199,7 +199,8 @@ def compare_uncertainty_measures(args=get_args()):
 
     # model_path = os.path.join(args.logdir, args.task, args.algo_name, f'seed_{args.seed}_model.pt')
     # policy_path = os.path.join(args.logdir, args.task, args.algo_name, f'seed_{args.seed}_policy.pth')
-    base_path = './log/halfcheetah-medium-replay-v2/mopo/seed_1_0707_184454-halfcheetah_medium_replay_v2_mopo'
+    base_path = f'./log/{args.task}/mopo/'
+    base_path += [f for f in os.listdir(base_path) if f.startswith(f'seed_{args.seed}')][0]
     model_path = os.path.join(base_path, 'models/ite_dynamics_model/model.pt')
     policy_path = os.path.join(base_path, 'policy.pth')
     load_model_components(dynamics_model, sac_policy, model_path, policy_path)
@@ -239,9 +240,9 @@ def compare_uncertainty_measures(args=get_args()):
         'spearman': spearman,
         'pearson': pearson
     }, index=[0])
-    results.to_csv(os.path.join(log_path, f'results_{args.uncertainty}_{args.task}.csv'), index=False)
-
-    np.savez_compressed(os.path.join(log_path, f'dist_uncertainty_{args.uncertainty}_{args.task}.npz'), dist=dist, uncertainty=uncertainty)
+    results.to_csv(os.path.join('outputs', f'results_{args.uncertainty}_{args.task}_{args.seed}.csv'), index=False)
+    plot_uncertainty_vs_distance(dist, uncertainty, save_path=os.path.join('outputs', f'uncertainty_vs_distance_{args.uncertainty}_{args.task}_{args.seed}.png'))
+    # np.savez_compressed(os.path.join(log_path, f'dist_uncertainty_{args.uncertainty}_{args.task}_{args.seed}.npz'), dist=dist, uncertainty=uncertainty)
 
 
 

@@ -12,6 +12,7 @@ import torch
 import wandb
 from torch.utils.tensorboard import SummaryWriter
 
+from models.ae_model import AutoencoderModel
 from models.transition_model import TransitionModel
 from models.policy_models import MLP, ActorProb, Critic, DiagGaussian
 from algo.sac import SACPolicy
@@ -109,9 +110,6 @@ def rollout(args=get_args()):
                                      dataset=dataset,
                                      **config["transition_params"]
                                      )
-    base_path = 'log/halfcheetah-medium-replay-v2/mopo/seed_1_0629_151301-halfcheetah_medium_replay_v2_mopo'
-    model_path = os.path.join(base_path, 'models/ite_dynamics_model/model.pt')
-    policy_path = os.path.join(base_path, 'policy.pth')
     model_path = ''
     policy_path = ''
     dynamics_model.model = torch.load(model_path)
@@ -241,7 +239,12 @@ def train(args=get_args()):
                                      dataset=dataset,
                                      **config["transition_params"]
                                      )
-
+    autoencoder_model = AutoencoderModel(
+        obs_space=env.observation_space,
+        action_space=env.action_space,
+        lr=1e-4,
+        dataset=dataset,
+    )
     # create buffer
     offline_buffer = ReplayBuffer(
         buffer_size=len(dataset["observations"]),
@@ -263,6 +266,7 @@ def train(args=get_args()):
     algo = MOPO(
         sac_policy,
         dynamics_model,
+        autoencoder_model,
         offline_buffer=offline_buffer,
         model_buffer=model_buffer,
         reward_penalty_coef=args.reward_penalty_coef,
@@ -285,11 +289,13 @@ def train(args=get_args()):
         eval_episodes=args.eval_episodes
     )
 
-    # pretrain dynamics model on the whole dataset
-    trainer.train_dynamics()
+    # # pretrain dynamics model on the whole dataset
+    # trainer.train_dynamics()
+    #
+    # # begin train
+    # trainer.train_policy()
 
-    # begin train
-    trainer.train_policy()
+    trainer.train_autoencoder()
 
 
 if __name__ == "__main__":

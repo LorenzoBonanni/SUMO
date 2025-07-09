@@ -39,6 +39,15 @@ class Trainer:
         self.algo.save_dynamics_model("dynamics_model")
         self.logger.print("total time: {:.3f}s".format(time.time() - start_time))
 
+    def train_autoencoder(self):
+        start_time = time.time()
+        self.algo.learn_ae()
+        #self.algo.save_dynamics_model(
+            #save_path=os.path.join(self.logger.writer.get_logdir(), "dynamics_model")
+        #)
+        self.algo.save_ae_model("ae_model")
+        self.logger.print("total time: {:.3f}s".format(time.time() - start_time))
+
     def train_policy(self):
         start_time = time.time()
         num_timesteps = 0
